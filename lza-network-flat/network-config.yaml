@@ -1,0 +1,347 @@
+###################################################################################
+# For additional configurable services, features, and property descriptions,      #
+# please review our network configuration reference in our README.md:             #
+# https://github.com/awslabs/landing-zone-accelerator-on-aws/blob/main/README.md  #
+###################################################################################
+
+homeRegion: &HOME_REGION us-east-1
+
+#####################################
+# Delete default VPCs -- use this    #
+# object to delete default VPCs in  #
+# any non-excluded accounts         #
+#####################################
+defaultVpc:
+  delete: true
+  excludeAccounts: []
+
+transitGateways: []
+
+#####################################
+# Endpoint policies -- use this     #
+# object to define standard policies #
+# for VPC endpoints                 #
+#####################################
+endpointPolicies:
+  - name: Default
+    document: vpc-endpoint-policies/default.json
+  - name: Ec2
+    document: vpc-endpoint-policies/ec2.json
+
+###########################################
+# Central Network Services -- use this    #
+# object to define centralized networking #
+# services for your environment.          #
+###########################################
+centralNetworkServices:
+  delegatedAdminAccount: Network
+  ipams:
+    - name: accelerator-ipam
+      region: *HOME_REGION
+      description: Accelerator IPAM
+      scope: Private
+      operatingRegions:
+        - *HOME_REGION
+      pools:
+        #base pool
+        - name: &BASE_POOL base-pool
+          description: accelerator-base
+          provisionedCidrs:
+            - 10.0.0.0/8
+        #regional pools
+        - name: home-region-pool
+          description: Pool for Home Region
+          locale: *HOME_REGION
+          provisionedCidrs:
+            - 10.0.0.0/16
+          sourceIpamPool: *BASE_POOL
+          shareTargets:
+            organizationalUnits:
+              - Root
+
+#####################################
+# VPCs-- use this object to deploy  #
+# a VPC in a single account and     #
+# region.                           #
+#####################################
+vpcs:
+  - name: Shared-Main
+    account: Network
+    region: *HOME_REGION
+    ipamAllocations:
+      - ipamPoolName: home-region-pool
+        netmaskLength: 20
+    internetGateway: true
+    enableDnsHostnames: true
+    enableDnsSupport: true
+    instanceTenancy: default
+    ### Uncomment if creating a S2S VPN. Update with your asn
+    # virtualPrivateGateway:
+    #   asn: 65000
+    natGateways:
+      - name: egress-nat-a
+        subnet: Network-Egress-A
+      - name: egress-nat-b
+        subnet: Network-Egress-B
+    routeTables:
+      - name: Shared-Main-Public
+        routes:
+          - name: Internet
+            type: internetGateway
+            destination: 0.0.0.0/0
+          - name: S3Gateway
+            type: gatewayEndpoint
+            target: s3
+          - name: DynamoDBGateway
+            type: gatewayEndpoint
+            target: dynamodb
+      - name: Shared-Main-Private-A
+        routes:
+          - name: NatRoute
+            destination: 0.0.0.0/0
+            type: natGateway
+            target: egress-nat-a
+          - name: S3Gateway
+            type: gatewayEndpoint
+            target: s3
+          - name: DynamoDBGateway
+            type: gatewayEndpoint
+            target: dynamodb
+      - name: Shared-Main-Private-B
+        routes:
+          - name: NatRoute
+            destination: 0.0.0.0/0
+            type: natGateway
+            target: egress-nat-b
+          - name: S3Gateway
+            type: gatewayEndpoint
+            target: s3
+          - name: DynamoDBGateway
+            type: gatewayEndpoint
+            target: dynamodb
+    subnets:
+      - name: Network-Endpoints-A
+        availabilityZone: a
+        routeTable: Shared-Main-Private-A
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 26
+      - name: Network-Endpoints-B
+        availabilityZone: b
+        routeTable: Shared-Main-Private-B
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 26
+      - name: Network-Egress-A
+        availabilityZone: a
+        routeTable: Shared-Main-Public
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 25
+      - name: Network-Egress-B
+        availabilityZone: b
+        routeTable: Shared-Main-Public
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 25
+      - name: SharedServices-A
+        availabilityZone: a
+        routeTable: Shared-Main-Private-A
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 24
+        shareTargets:
+          organizationalUnits:
+            - Infrastructure
+      - name: SharedServices-B
+        availabilityZone: b
+        routeTable: Shared-Main-Private-B
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 24
+        shareTargets:
+          organizationalUnits:
+            - Infrastructure
+      ### Use these subnets as a template for your workloads
+      - name: Workload-App-1-Prod-A
+        availabilityZone: a
+        routeTable: Shared-Main-Private-A
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 26
+        shareTargets:
+          organizationalUnits:
+            - Workload/Prod
+      - name: Workload-App-1-Prod-B
+        availabilityZone: b
+        routeTable: Shared-Main-Private-B
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 26
+        shareTargets:
+          organizationalUnits:
+            - Workload/Prod
+      - name: Workload-App-1-Test-A
+        availabilityZone: a
+        routeTable: Shared-Main-Private-A
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 26
+        shareTargets:
+          organizationalUnits:
+            - Workload/Test
+      - name: Workload-App-1-Test-B
+        availabilityZone: b
+        routeTable: Shared-Main-Private-B
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 26
+        shareTargets:
+          organizationalUnits:
+            - Workload/Test
+    ### Uncomment if you wish to deploy NACLs. Use these as a template for your workloads and network requirements
+    # networkAcls:
+    #   - name: workload-segmentation-nacl
+    #     subnetAssociations:
+    #       - Workload-App-1-Prod-A
+    #       - Workload-App-1-Prod-B
+    #       - Workload-App-1-Test-A
+    #       - Workload-App-1-Test-B
+    #     inboundRules:
+    #       - rule: 100
+    #         protocol: -1
+    #         fromPort: -1
+    #         toPort: -1
+    #         action: allow
+    #         source: 0.0.0.0/8
+    #       - rule: 201
+    #         protocol: -1
+    #         fromPort: -1
+    #         toPort: -1
+    #         action: deny
+    #         source: 
+    #           account: Network
+    #           vpc: Shared-Main
+    #           subnet: Workload-App-1-Prod-A
+    #       - rule: 202
+    #         protocol: -1
+    #         fromPort: -1
+    #         toPort: -1
+    #         action: allow
+    #         source: 
+    #           account: Network
+    #           vpc: Shared-Main
+    #           subnet: Network-Endpoints-A
+    #       - rule: 203
+    #         protocol: -1
+    #         fromPort: -1
+    #         toPort: -1
+    #         action: allow
+    #         source: 
+    #           account: Network
+    #           vpc: Shared-Main
+    #           subnet: Network-Endpoints-B
+    #       - rule: 204
+    #         protocol: -1
+    #         fromPort: -1
+    #         toPort: -1
+    #         action: allow
+    #         source: 
+    #           account: Network
+    #           vpc: Shared-Main
+    #           subnet: SharedServices-A
+    #       - rule: 205
+    #         protocol: -1
+    #         fromPort: -1
+    #         toPort: -1
+    #         action: allow
+    #         source: 
+    #           account: Network
+    #           vpc: Shared-Main
+    #           subnet: SharedServices-B     
+    #     outboundRules:
+    #       - rule: 100
+    #         protocol: -1
+    #         fromPort: -1
+    #         toPort: -1
+    #         action: allow
+    #         destination: 0.0.0.0/0
+    gatewayEndpoints:
+      defaultPolicy: Default
+      endpoints:
+        - service: s3
+        - service: dynamodb
+    interfaceEndpoints:
+      defaultPolicy: Default
+      subnets:
+        - Network-Endpoints-A
+        - Network-Endpoints-B
+      endpoints:
+        - service: ec2
+        - service: ec2messages
+        - service: ssm
+        - service: ssmmessages
+        - service: kms
+        - service: logs
+
+##############################################################
+# Global configuration for VPC flow logs                     #
+# Where there is no flow log configuration defined with VPC  #
+# this configuration will be used for flow log configuration #
+##############################################################
+vpcFlowLogs:
+  trafficType: ALL
+  maxAggregationInterval: 600
+  destinations:
+    - cloud-watch-logs
+  destinationsConfig:
+    cloudWatchLogs:
+      retentionInDays: 30
+  defaultFormat: false
+  customFields:
+    - version
+    - account-id
+    - interface-id
+    - srcaddr
+    - dstaddr
+    - srcport
+    - dstport
+    - protocol
+    - packets
+    - bytes
+    - start
+    - end
+    - action
+    - log-status
+    - vpc-id
+    - subnet-id
+    - instance-id
+    - tcp-flags
+    - type
+    - pkt-srcaddr
+    - pkt-dstaddr
+    - region
+    - az-id
+    - pkt-src-aws-service
+    - pkt-dst-aws-service
+    - flow-direction
+    - traffic-path
+
+##############################################################
+# Customer Gateways and VPNs #
+##############################################################
+### Uncomment if creating a S2S VPN. Update with your configuration
+# customerGateways:
+#   - name: accelerator-cgw
+#     account: Network
+#     region: *HOME_REGION
+#     ipAddress: 1.1.1.1
+#     asn: 65500
+#     vpnConnections:
+#       - name: accelerator-vpn
+#         vpc: Shared-Main
+#         staticRoutesOnly: false
+#         # Tunnel specifications are optional
+#         tunnelSpecifications:
+#           - tunnelInsideCidr: 169.254.200.0/30
+#           - tunnelInsideCidr: 169.254.200.100/30
