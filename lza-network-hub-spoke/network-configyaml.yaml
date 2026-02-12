@@ -1,0 +1,1004 @@
+# © 2025 Amazon Web Services, Inc. or its affiliates. All Rights Reserved.
+# This AWS Content is provided subject to the terms of the AWS Customer Agreement
+# available at https://aws.amazon.com/agreement or other written agreement between
+# Customer and either Amazon Web Services, Inc. or Amazon Web Services EMEA SARL or both.
+
+homeRegion: &HOME_REGION us-west-2
+defaultVpc:
+  delete: true
+  excludeAccounts: []
+centralNetworkServices:
+  delegatedAdminAccount: Network
+  ipams:
+    - name: aws-ipam
+      region: *HOME_REGION
+      description: AWS IPAM for Cloud Network Address ranges
+      operatingRegions:
+        - *HOME_REGION
+      pools:
+        # defining CIDRs
+        - name: &BASE_POOL base-pool
+          description: AWS base IPAM pool
+          provisionedCidrs:
+            - 10.0.0.0/16
+          shareTargets:
+            organizationalUnits:
+              - Root
+        # Defining home/main/first region CIDR
+        - name: home-region-pool
+          description: IPAM Pool for home region
+          locale: *HOME_REGION
+          provisionedCidrs:
+            - 10.0.0.0/16
+          shareTargets:
+            organizationalUnits:
+              - Root
+          sourceIpamPool: *BASE_POOL
+        # Defining core Network Account pool in home region CIDR
+        - name: core-network-pool
+          description: Core Infrastructure network pool for primary region
+          locale: *HOME_REGION
+          provisionedCidrs:
+            - 10.0.0.0/22
+          shareTargets:
+            organizationalUnits:
+              - Root
+          sourceIpamPool: home-region-pool
+  route53Resolver:
+    endpoints:
+      - name: r53-resolver-inbound-endpoint
+        type: INBOUND
+        vpc: Network-Endpoints-VPC
+        subnets:
+          - EndpointsVpc-PrivateSubnet-A
+          - EndpointsVpc-PrivateSubnet-B
+      - name: r53-resolver-outbound-endpoint
+        type: OUTBOUND
+        vpc: Network-Endpoints-VPC
+        subnets:
+          - EndpointsVpc-PrivateSubnet-A
+          - EndpointsVpc-PrivateSubnet-B
+        rules: []
+#GW Load balancer with 3 endpoints
+  gatewayLoadBalancers:
+    - name: Firewall-Gwlb
+      subnets:
+        - InspectionVpc-GwlbSubnet-A
+        - InspectionVpc-GwlbSubnet-B
+      vpc: Network-Inspection-VPC
+      deletionProtection: true
+      crossZoneLoadBalancing: true
+      endpoints:
+        # inspection VPC endpoints
+        - name: InspectionVpc-Gwlb-Endpoint-A
+          account: Network
+          subnet: InspectionVpc-GwlbSubnet-A
+          vpc: Network-Inspection-VPC
+        - name: InspectionVpc-Gwlb-Endpoint-B
+          account: Network
+          subnet: InspectionVpc-GwlbSubnet-B
+          vpc: Network-Inspection-VPC
+        # creates Gwlb endpoint in IngressVpc to inspect ingress traffic on edge
+        - name: IngressVpc-Gwlb-Endpoint-A
+          account: Network
+          subnet: IngressVpc-InspectionSubnet-A
+          vpc: Network-Ingress-VPC
+        - name: IngressVpc-Gwlb-Endpoint-B
+          account: Network
+          subnet: IngressVpc-InspectionSubnet-B
+          vpc: Network-Ingress-VPC
+        # egress VPC endpoints
+        - name: EgressVpc-Gwlb-Endpoint-A
+          account: Network
+          subnet: EgressVpc-InspectionSubnet-A
+          vpc: Network-Egress-VPC 
+        - name: EgressVpc-Gwlb-Endpoint-B
+          account: Network
+          subnet: EgressVpc-InspectionSubnet-B
+          vpc: Network-Egress-VPC 
+#TGW
+transitGateways: 
+  - name: test-tgw
+    account: Network
+    region: *HOME_REGION
+    shareTargets:
+      organizationalUnits:
+        - Infrastructure
+        - Workloads
+    asn: 65516
+    dnsSupport: enable
+    vpnEcmpSupport: enable
+    defaultRouteTableAssociation: disable
+    defaultRouteTablePropagation: disable
+    autoAcceptSharingAttachments: enable
+    routeTables:
+      - name: workload-TgwRT
+        routes:
+          - destinationCidrBlock: 0.0.0.0/0 #all non vpc traffic is sent to Egress VPC, where it will still get sent to firewall via endpoint there
+            attachment:              
+              vpcName: Network-Egress-VPC
+              account: Network
+          - destinationCidrBlock: 10.0.0.0/16 #So all traffic is forced to inspection VPC
+            attachment:              
+              vpcName: Network-Inspection-VPC
+              account: Network
+      - name: Network-SharedServices-TgwRT
+        routes:
+          - destinationCidrBlock: 0.0.0.0/0 #all non vpc traffic is sent to Egress VPC, where it will still get sent to firewall via endpoint there
+            attachment:              
+              vpcName: Network-Egress-VPC
+              account: Network
+          - destinationCidrBlock: 10.0.0.0/16 #So all traffic is forced to inspection VPC
+            attachment:              
+              vpcName: Network-Inspection-VPC
+              account: Network
+      - name: Network-Inspection-TgwRT #child vpcs will also propogate themselves to this, tgw peering routes to be added for DX/on prem
+        routes: []
+      - name: Network-Ingress-TgwRT #child vpcs will also propogate themselves to this
+        routes:
+          - destinationCidrBlock: 0.0.0.0/0 #When F5s make requests to internet
+            attachment:
+              vpcName: Network-Egress-VPC
+              account: Network
+      - name: Network-Endpoints-TgwRT #child vpcs will also propogate themselves to this
+        routes:
+          - destinationCidrBlock: 0.0.0.0/0 
+            attachment:
+              vpcName: Network-Egress-VPC
+              account: Network
+          - destinationCidrBlock: 10.0.0.0/16 # this needs to be updated with final cidr range that is decided on
+            attachment:              
+              vpcName: Network-Inspection-VPC
+              account: Network
+      - name: Network-Egress-TgwRT #child vpcs will also propogate themselves to this
+        routes:
+          - destinationCidrBlock: 0.0.0.0/0
+            attachment:
+              vpcName: Network-Egress-VPC
+              account: Network
+endpointPolicies: 
+  - name: Default
+    document: vpc-endpoint-policies/default.json
+  - name: Ec2
+    document: vpc-endpoint-policies/ec2.json
+
+#######################################
+## VPC Templates                     ##
+#######################################
+
+#Host centralized VPC Service Endpoints
+vpcs:
+  - name: Network-Endpoints-VPC
+    account: Network
+    region: *HOME_REGION
+    ipamAllocations:
+      - ipamPoolName: core-network-pool
+        netmaskLength: 24
+    internetGateway: false
+    enableDnsHostnames: true
+    enableDnsSupport: true
+    instanceTenancy: default
+    defaultSecurityGroupRulesDeletion: true
+    routeTables:
+      - name: EndpointsVpc-TgwRT-A
+        routes: []
+      - name: EndpointsVpc-TgwRT-B
+        routes: []
+      - name: EndpointsVpc-PrivateRT-A
+        routes:
+          - name: TgwRoute
+            destination: 0.0.0.0/0
+            type: transitGateway
+            target: test-tgw
+          - name: S3Gateway
+            type: gatewayEndpoint
+            target: s3
+          - name: DynamoDBGateway
+            type: gatewayEndpoint
+            target: dynamodb
+      - name: EndpointsVpc-PrivateRT-B
+        routes:
+          - name: TgwRoute
+            destination: 0.0.0.0/0
+            type: transitGateway
+            target: test-tgw
+          - name: S3Gateway
+            type: gatewayEndpoint
+            target: s3
+          - name: DynamoDBGateway
+            type: gatewayEndpoint
+            target: dynamodb
+    subnets:
+      - name: EndpointsVpc-PrivateSubnet-A
+        availabilityZone: 1
+        routeTable: EndpointsVpc-PrivateRT-A
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 26
+      - name: EndpointsVpc-PrivateSubnet-B
+        availabilityZone: 2
+        routeTable: EndpointsVpc-PrivateRT-B
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 26
+      - name: EndpointsVpc-TgwSubnet-A
+        availabilityZone: 1
+        routeTable: EndpointsVpc-TgwRT-A
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+      - name: EndpointsVpc-TgwSubnet-B
+        availabilityZone: 2
+        routeTable: EndpointsVpc-TgwRT-B
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+    transitGatewayAttachments:
+      - name: Endpoints-VPC-Tgw-Attachment
+        transitGateway:
+          name: test-tgw
+          account: Network
+        routeTableAssociations:
+          - Network-Endpoints-TgwRT
+        routeTablePropagations:
+          # - Network-Endpoints-TgwRT
+         - Network-Inspection-TgwRT
+         #- Network-Egress-TgwRT
+         #- Network-Ingress-TgwRT
+          # - SharedServices-TgwRT # uncomment if this doesn't need inspection
+        subnets:
+          - EndpointsVpc-TgwSubnet-A
+          - EndpointsVpc-TgwSubnet-B
+    gatewayEndpoints:
+      defaultPolicy: Default
+      endpoints:
+        - service: s3
+        - service: dynamodb
+    interfaceEndpoints:
+      central: true
+      defaultPolicy: Default
+      subnets:
+        - EndpointsVpc-PrivateSubnet-A
+        - EndpointsVpc-PrivateSubnet-B
+      endpoints:
+        - service: ec2
+        - service: ec2messages
+        - service: ssm
+        - service: ssmmessages
+        - service: kms
+        - service: logs
+        - service: lambda
+        - service: glue
+        # - service: s3   #Use GW endpoint in VPC, if we need endpoint for on-prem, do the R53 forward rule workaround
+    useCentralEndpoints: true
+    resolverRules: []
+  # Egress VPC: Central VPC for egress traffic
+  - name: Network-Egress-VPC
+    account: Network
+    region: *HOME_REGION
+    ipamAllocations:
+      - ipamPoolName: core-network-pool
+        netmaskLength: 24
+    internetGateway: true
+    enableDnsHostnames: true
+    enableDnsSupport: true
+    instanceTenancy: default
+    defaultSecurityGroupRulesDeletion: true
+    natGateways:
+      - name: EgressVpc-NAT-A
+        subnet: EgressVpc-PublicSubnet-A
+      - name: EgressVpc-NAT-B
+        subnet: EgressVpc-PublicSubnet-B
+    routeTables:
+      - name: EgressVpc-PublicRT-A
+        routes:
+          - name: EndpointInspection
+            destination: 10.0.0.0/16 #This is the route for response traffic from interent, when NAT gateway DeNATs, the private ip of workload is seen, this is then sent to GWLB for inspection
+            type: gatewayLoadBalancerEndpoint
+            target: EgressVpc-Gwlb-Endpoint-A
+          - name: Internet
+            destination: 0.0.0.0/0
+            type: internetGateway
+      - name: EgressVpc-PublicRT-B
+        routes:
+          - name: EndpointInspection
+            destination: 10.0.0.0/16 #This is the route for response traffic from interent, when NAT gateway DeNATs, the private ip of workload is seen, this is then sent to GWLB for inspection
+            type: gatewayLoadBalancerEndpoint
+            target: EgressVpc-Gwlb-Endpoint-B
+          - name: Internet
+            destination: 0.0.0.0/0
+            type: internetGateway
+      - name: EgressVpc-TgwRT-A
+        routes:
+          - name: InspectionRoute
+            destination: 0.0.0.0/0 #Traffic coming from workload VPCs, destined for internet, gets sent to GWLB for inspection
+            type: gatewayLoadBalancerEndpoint
+            target: EgressVpc-Gwlb-Endpoint-A
+      - name: EgressVpc-TgwRT-B
+        routes:
+          - name: InspectionRoute
+            destination: 0.0.0.0/0 #Traffic coming from workload VPCs, destined for internet, gets sent to GWLB for inspection
+            type: gatewayLoadBalancerEndpoint
+            target: EgressVpc-Gwlb-Endpoint-B
+      - name: EgressVpc-InspectionSubnetRT-A 
+        routes:
+          - name: NatRoute
+            destination: 0.0.0.0/0 #Traffic coming from workload VPCs, has been inspected by GWLB,destined for internet, sent to NAT
+            type: natGateway
+            target: EgressVpc-NAT-A
+          - name: TgwRouteCore
+            destination: 10.0.0.0/16 #Traffic coming back from internet, has been inspected by GWLB, destined for workload VPC, sent to TGW
+            type: transitGateway
+            target: test-tgw
+      - name: EgressVpc-InspectionSubnetRT-B
+        routes:
+          - name: NatRoute
+            destination: 0.0.0.0/0 #Traffic coming from workload VPCs, has been inspected by GWLB,destined for internet, sent to NAT
+            type: natGateway
+            target: EgressVpc-NAT-B
+          - name: TgwRouteCore
+            destination: 10.0.0.0/16 #Traffic coming back from internet, has been inspected by GWLB, destined for workload VPC, sent to TGW
+            type: transitGateway
+            target: test-tgw
+    subnets:
+      - name: EgressVpc-PublicSubnet-A
+        availabilityZone: 1
+        routeTable: EgressVpc-PublicRT-A
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 26
+      - name: EgressVpc-PublicSubnet-B
+        availabilityZone: 2
+        routeTable: EgressVpc-PublicRT-B
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 26
+      - name: EgressVpc-TgwSubnet-A
+        availabilityZone: 1
+        routeTable: EgressVpc-TgwRT-A
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+      - name: EgressVpc-TgwSubnet-B
+        availabilityZone: 2
+        routeTable: EgressVpc-TgwRT-B
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+      - name: EgressVpc-InspectionSubnet-A
+        availabilityZone: 1
+        routeTable: EgressVpc-InspectionSubnetRT-A 
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+      - name: EgressVpc-InspectionSubnet-B
+        availabilityZone: 2
+        routeTable: EgressVpc-InspectionSubnetRT-B
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+    transitGatewayAttachments:
+      - name: Egress-VPC-Tgw-Attachment
+        transitGateway:
+          name: test-tgw
+          account: Network
+        routeTableAssociations:
+          - Network-Egress-TgwRT
+        subnets:
+          - EgressVpc-TgwSubnet-A
+          - EgressVpc-TgwSubnet-B
+    useCentralEndpoints: true
+
+  # Ingress VPC: Central VPC for ingress traffic
+  - name: Network-Ingress-VPC
+    account: Network
+    region: *HOME_REGION
+    ipamAllocations:
+      - ipamPoolName: core-network-pool
+        netmaskLength: 24
+    internetGateway: true
+    enableDnsHostnames: true
+    enableDnsSupport: true
+    instanceTenancy: default
+    defaultSecurityGroupRulesDeletion: true
+    #natGateways:
+    #  - name: IngressVpc-NAT-A
+    #    subnet: IngressVpc-PublicSubnet-A
+    #  - name: IngressVpc-NAT-B
+    #    subnet: IngressVpc-PublicSubnet-B
+    routeTables:
+    # build the IGW route to the public subnets for Gwlb
+    #   - name: IngressVpc-IGW
+    #     gatewayAssociation: internetGateway
+    #     routes:
+    #       - name: IGWtoGwlbe-A
+    #         destination: IngressVpc-PublicSubnet-A
+    #         type: gatewayLoadBalancerEndpoint
+    #         target: IngressVpc-Gwlb-Endpoint-A
+    #       - name: IGWtoGwlbe-B
+    #         destination: IngressVpc-PublicSubnet-B
+    #         type: gatewayLoadBalancerEndpoint
+    #         target: IngressVpc-Gwlb-Endpoint-B
+      - name: IngressVpc-PublicRT-A
+        routes:
+          - name: TgwRouteCore
+            destination: 10.0.0.0/16 #After ALB/F5 receives internet traffic, the destination becomes the backend workload ip...this gets sent to GWLB for inspection
+            type: gatewayLoadBalancerEndpoint 
+            target: IngressVpc-Gwlb-Endpoint-A
+          - name: Internet
+            destination: 0.0.0.0/0
+            type: internetGateway
+      - name: IngressVpc-PublicRT-B
+        routes:
+          - name: TgwRouteCore
+            destination: 10.0.0.0/16 #After ALB/F5 receives internet traffic, the destination becomes the backend workload ip...this gets sent to GWLB for inspection
+            type: gatewayLoadBalancerEndpoint
+            target: IngressVpc-Gwlb-Endpoint-B
+          - name: Internet
+            destination: 0.0.0.0/0
+            type: internetGateway
+      - name: IngressVpc-TgwRT-A
+        routes:
+          - name: GWLBendpoint1 #Traffic coming back from workload VPCs, needs to be inspected before sent back to F5/ALB
+            destination: 0.0.0.0/0
+            type: gatewayLoadBalancerEndpoint 
+            target: IngressVpc-Gwlb-Endpoint-A 
+      - name: IngressVpc-TgwRT-B
+        routes:
+          - name: GWLBendpoint2 #Traffic coming back from workload VPCs, needs to be inspected before sent back to F5/ALB
+            destination: 0.0.0.0/0
+            type: gatewayLoadBalancerEndpoint 
+            target: IngressVpc-Gwlb-Endpoint-A 
+      - name: IngressVpc-InspectionSubnetRT-A 
+        routes:
+          - name: TgwRouteCore
+            destination: 10.0.0.0/16 #After traffic is inspected, if its destined for workload-inbound, it gets sent to TGW, If its response traffic, it will use local route to go to ALB/F5
+            type: transitGateway
+            target: test-tgw
+      - name: IngressVpc-InspectionSubnetRT-B
+        routes:
+          - name: TgwRouteCore
+            destination: 10.0.0.0/16 #After traffic is inspected, if its destined for workload-inbound, it gets sent to TGW, If its response traffic, it will use local route to go to ALB/F5
+            type: transitGateway
+            target: test-tgw
+    subnets:
+      - name: IngressVpc-PublicSubnet-A
+        availabilityZone: 1
+        routeTable: IngressVpc-PublicRT-A
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 26
+      - name: IngressVpc-PublicSubnet-B
+        availabilityZone: 2
+        routeTable: IngressVpc-PublicRT-B
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 26
+      - name: IngressVpc-TgwSubnet-A
+        availabilityZone: 1
+        routeTable: IngressVpc-TgwRT-A
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+      - name: IngressVpc-TgwSubnet-B
+        availabilityZone: 2
+        routeTable: IngressVpc-TgwRT-B
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+      - name: IngressVpc-InspectionSubnet-A
+        availabilityZone: 1
+        routeTable: IngressVpc-InspectionSubnetRT-A 
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+      - name: IngressVpc-InspectionSubnet-B
+        availabilityZone: 2
+        routeTable: IngressVpc-InspectionSubnetRT-B
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+
+    transitGatewayAttachments:
+      - name: Ingress-VPC-Tgw-Attachment
+        transitGateway:
+          name: test-tgw
+          account: Network
+        routeTableAssociations:
+          - Network-Ingress-TgwRT
+        routeTablePropagations:
+          - Network-Egress-TgwRT
+          - workload-TgwRT
+          - Network-Endpoints-TgwRT
+          - Network-SharedServices-TgwRT
+        subnets:
+          - IngressVpc-TgwSubnet-A
+          - IngressVpc-TgwSubnet-B
+    useCentralEndpoints: true
+
+  # Inspection VPC: Central VPC for inspection traffic: this will be different if cust wants 3rd party fw
+  - name: Network-Inspection-VPC
+    account: Network
+    region: *HOME_REGION
+    ipamAllocations:
+      - ipamPoolName: core-network-pool
+        netmaskLength: 24
+    internetGateway: true 
+    enableDnsHostnames: true
+    enableDnsSupport: true
+    instanceTenancy: default
+    defaultSecurityGroupRulesDeletion: true
+    natGateways: 
+      - name: InspectionVpc-NAT-A
+        subnet: InspectionVpc-PublicSubnet-A
+      - name: InspectionVpc-NAT-B
+        subnet: InspectionVpc-PublicSubnet-B
+    routeTables:
+      - name: InspectionVpc-ApplianceSubnet-RT-A
+        routes:
+          - name: NatRoute
+            destination: 0.0.0.0/0
+            type: natGateway
+            target: InspectionVpc-NAT-A
+          - name: TgwRoute
+            destination: 10.0.0.0/16
+            type: transitGateway
+            target: test-tgw
+          - name: OnPremCidr
+            destination: [SAMPLE ON PREM IP]
+            type: transitGateway
+            target: test-tgw
+      - name: InspectionVpc-ApplianceSubnet-RT-B
+        routes:
+          - name: NatRoute
+            destination: 0.0.0.0/0
+            type: natGateway
+            target: InspectionVpc-NAT-B
+          - name: TgwRoute
+            destination: 10.0.0.0/16
+            type: transitGateway
+            target: test-tgw
+          - name: OnPremCidr
+            destination: [SAMPLE ON PREM IP]
+            type: transitGateway
+            target: test-tgw
+      - name: InspectionVpc-TgwSubnet-RT-A
+        routes:
+          - name: GwlbRoute
+            destination: 0.0.0.0/0 #All traffic coming in is expected to need inspection, sent to GWLB
+            type: gatewayLoadBalancerEndpoint
+            target: InspectionVpc-Gwlb-Endpoint-A
+      - name: InspectionVpc-TgwSubnet-RT-B
+        routes:
+          - name: GwlbRoute
+            destination: 0.0.0.0/0 #All traffic coming in is expected to need inspection, sent to GWLB
+            type: gatewayLoadBalancerEndpoint
+            target: InspectionVpc-Gwlb-Endpoint-B
+          # - name: NfwRoute
+          #   destination: 0.0.0.0/0
+          #   type: networkFirewall
+          #   target: core-network-firewall
+          #   targetAvailabilityZone: b
+      - name: InspectionVpc-GwlbSubnet-RT-A
+        routes:
+          - name: TgwRouteCore
+            destination: 0.0.0.0/0 #All traffic after inspection is sent back to TGW for VPC routing
+            type: transitGateway
+            target: test-tgw
+      - name: InspectionVpc-GwlbSubnet-RT-B
+        routes:
+          - name: TgwRouteCore
+            destination: 0.0.0.0/0 #All traffic after inspection is sent back to TGW for VPC routing
+            type: transitGateway
+            target: test-tgw
+      - name: InspectionVpc-PublicSubnet-RT-A 
+        routes:
+          - name: Internet
+            destination: 0.0.0.0/0
+            type: internetGateway
+      - name: InspectionVpc-PublicSubnet-RT-B 
+        routes:
+          - name: Internet
+            destination: 0.0.0.0/0
+            type: internetGateway
+    subnets:
+      - name: InspectionVpc-ApplianceSubnet-A
+        availabilityZone: 1
+        routeTable: InspectionVpc-ApplianceSubnet-RT-A
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 26
+      - name: InspectionVpc-ApplianceSubnet-B
+        availabilityZone: 2
+        routeTable: InspectionVpc-ApplianceSubnet-RT-B
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 26
+      - name: InspectionVpc-GwlbSubnet-A
+        availabilityZone: 1
+        routeTable: InspectionVpc-GwlbSubnet-RT-A
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+      - name: InspectionVpc-GwlbSubnet-B
+        availabilityZone: 2
+        routeTable: InspectionVpc-GwlbSubnet-RT-B
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+      - name: InspectionVpc-TgwSubnet-A
+        availabilityZone: 1
+        routeTable: InspectionVpc-TgwSubnet-RT-A
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+      - name: InspectionVpc-TgwSubnet-B
+        availabilityZone: 2
+        routeTable: InspectionVpc-TgwSubnet-RT-B
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+      - name: InspectionVpc-PublicSubnet-A
+        availabilityZone: 1
+        routeTable: InspectionVpc-PublicSubnet-RT-A
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+      - name: InspectionVpc-PublicSubnet-B
+        availabilityZone: 2
+        routeTable: InspectionVpc-PublicSubnet-RT-B
+        ipamAllocation:
+          ipamPoolName: core-network-pool
+          netmaskLength: 28
+    transitGatewayAttachments:
+      - name: Inspection-VPC-Tgw-Attachment
+        transitGateway:
+          name: test-tgw
+          account: Network
+        options:
+          applianceModeSupport: enable        
+        routeTableAssociations:
+          - Network-Inspection-TgwRT
+        routeTablePropagations: 
+          - Network-Endpoints-TgwRT
+        subnets:
+          - InspectionVpc-TgwSubnet-A
+          - InspectionVpc-TgwSubnet-B
+    useCentralEndpoints: true
+#Workload VPC
+  ##Shared Services VPC  
+  - name: SharedServices-VPC
+    account: SharedServices
+    region: *HOME_REGION
+    ipamAllocations:
+      - ipamPoolName: home-region-pool
+        netmaskLength: 22
+    internetGateway: true
+    enableDnsHostnames: true
+    enableDnsSupport: true
+    instanceTenancy: default
+    defaultSecurityGroupRulesDeletion: true
+    routeTables:
+      - name: SS-EdgeRT-A
+        routes:
+          - name: IgwRoute
+            destination: 0.0.0.0/0
+            type: internetGateway
+            target: IGW
+          - name: TgwRoute
+            destination: 10.0.0.0/16
+            type: transitGateway
+            target: test-tgw
+          - name: S3Gateway
+            type: gatewayEndpoint
+            target: s3
+          - name: DynamoDBGateway
+            type: gatewayEndpoint
+            target: dynamodb
+          - name: TgwRoute1
+            destination: [SAMPLE ON PREM IP]
+            type: transitGateway
+            target: test-tgw
+      - name: SS-EdgeRT-B
+        routes:
+          - name: IgwRoute
+            destination: 0.0.0.0/0
+            type: internetGateway
+            target: IGW
+          - name: TgwRoute
+            destination: 10.0.0.0/16
+            type: transitGateway
+            target: test-tgw
+          - name: S3Gateway
+            type: gatewayEndpoint
+            target: s3
+          - name: DynamoDBGateway
+            type: gatewayEndpoint
+            target: dynamodb
+          - name: TgwRoute1
+            destination: [SAMPLE ON PREM IP]
+            type: transitGateway
+            target: test-tgw
+      - name: SS-PrivateRT-A
+        routes:
+          - name: TgwRoute
+            destination: 0.0.0.0/0
+            type: transitGateway
+            target: test-tgw
+          - name: S3Gateway
+            type: gatewayEndpoint
+            target: s3
+          - name: DynamoDBGateway
+            type: gatewayEndpoint
+            target: dynamodb
+      - name: SS-PrivateRT-B
+        routes:
+          - name: TgwRoute
+            destination: 0.0.0.0/0
+            type: transitGateway
+            target: test-tgw
+          - name: S3Gateway
+            type: gatewayEndpoint
+            target: s3
+          - name: DynamoDBGateway
+            type: gatewayEndpoint
+            target: dynamodb
+      - name: SS-SecureRT-A
+        routes: []
+      - name: SS-SecureRT-B
+        routes: []
+    subnets:
+      - name: SS-PrivateSubnet-A
+        availabilityZone: 1
+        routeTable: SS-PrivateRT-A
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 24
+      - name: SS-PrivateSubnet-B
+        availabilityZone: 2
+        routeTable: SS-PrivateRT-B
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 24
+      - name: SS-EdgeSubnet-A
+        availabilityZone: 1
+        routeTable: SS-EdgeRT-A
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 28
+      - name: SS-EdgeSubnet-B
+        availabilityZone: 2
+        routeTable: SS-EdgeRT-B
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 28
+      - name: SS-SecureSubnet-A
+        availabilityZone: 1
+        routeTable: SS-SecureRT-A
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 26
+      - name: SS-SecureSubnet-B
+        availabilityZone: 2
+        routeTable: SS-SecureRT-B
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 26
+    transitGatewayAttachments:
+      - name: SharedServicesVpc-Tgw-Attachment
+        transitGateway:
+          name: test-tgw
+          account: Network
+        routeTableAssociations:
+          - Network-SharedServices-TgwRT
+        routeTablePropagations:
+          - Network-Egress-TgwRT
+          - Network-Inspection-TgwRT
+          - Network-Ingress-TgwRT
+        subnets:
+          - SS-PrivateSubnet-A
+          - SS-PrivateSubnet-B
+    gatewayEndpoints:
+      defaultPolicy: Default
+      endpoints:
+        - service: s3
+        - service: dynamodb
+    useCentralEndpoints: true
+    resolverRules: []
+vpcTemplates:
+  - name: workload-vpc
+    region: *HOME_REGION
+    deploymentTargets:
+      accounts:
+        - App-1
+        - App-2
+      organizationalUnits: []
+      # excludeAccounts: [] 
+    ipamAllocations:
+      - ipamPoolName: home-region-pool
+        netmaskLength: 22
+    internetGateway: true
+    enableDnsHostnames: true
+    enableDnsSupport: true
+    instanceTenancy: default
+    defaultSecurityGroupRulesDeletion: true
+    securityGroups:
+      - name: linux-core-sg
+        description: ports needed for linux os
+        inboundRules:
+          - description: Remote access security group rule
+            types:
+              - SSH
+            sources:
+              - [SAMPLE IP]
+        outboundRules:
+          - description: Allow all outbound
+            types:
+              - ALL
+            sources:
+              - 0.0.0.0/0
+      - name: windows-core-sg
+        description: Ports needed for Windows OS
+        inboundRules:
+          - description: Allow RDP
+            types:
+              - TCP
+            fromPort: 3389
+            toPort: 3389
+            sources:
+              - [SAMPLE IP]
+        outboundRules:
+          - description: Allow all outbound
+            types:
+              - ALL
+            sources:
+              - 0.0.0.0/0
+    routeTables:
+      - name: workload-PrivateRT
+        routes:
+          - name: TgwRoute
+            destination: 0.0.0.0/0
+            type: transitGateway
+            target: test-tgw
+          - name: S3Gateway
+            type: gatewayEndpoint
+            target: s3
+          - name: DynamoDBGateway
+            type: gatewayEndpoint
+            target: dynamodb
+      - name: workload-Isolated-PrivateRT
+        routes:
+          - name: S3Gateway
+            type: gatewayEndpoint
+            target: s3
+      - name: workload-PublicRT
+        routes:
+          - name: IgwRoute
+            destination: 0.0.0.0/0
+            type: internetGateway
+          - name: onprem1
+            destination: [SAMPLE ON PREM IP]
+            type: transitGateway
+            target: test-tgw
+          - name: S3Gateway
+            type: gatewayEndpoint
+            target: s3
+          - name: DynamoDBGateway
+            type: gatewayEndpoint
+            target: dynamodb
+    subnets:
+      - name: workload-PrivateSubnet-A
+        availabilityZone: 1
+        routeTable: workload-PrivateRT
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 24
+      - name: workload-PrivateSubnet-B
+        availabilityZone: 2
+        routeTable: workload-PrivateRT
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 24
+      - name: workload-isolated-PrivateSubnet-A
+        availabilityZone: 1
+        routeTable: workload-Isolated-PrivateRT
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 26
+      - name: workload-isolated-PrivateSubnet-B
+        availabilityZone: 2
+        routeTable: workload-Isolated-PrivateRT
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 26
+      - name: workload-PublicSubnet-A
+        availabilityZone: 1
+        routeTable: workload-PublicRT
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 25
+      - name: workload-PublicSubnet-B
+        availabilityZone: 2
+        routeTable: workload-PublicRT
+        ipamAllocation:
+          ipamPoolName: home-region-pool
+          netmaskLength: 25
+
+    transitGatewayAttachments:
+      - name: workloadvpc-Tgw-Attachment
+        transitGateway:
+          name: test-tgw
+          account: Network
+        routeTableAssociations:
+          - workload-TgwRT
+        routeTablePropagations:
+          - Network-Egress-TgwRT
+          - Network-Inspection-TgwRT
+          - Network-Ingress-TgwRT
+        subnets:
+          - workload-PrivateSubnet-A
+          - workload-PrivateSubnet-B
+    gatewayEndpoints:
+      defaultPolicy: Default
+      endpoints:
+        - service: s3
+        - service: dynamodb
+    interfaceEndpoints:
+      central: false
+      defaultPolicy: Default
+      subnets:
+          - workload-PrivateSubnet-A
+          - workload-PrivateSubnet-B
+      endpoints:
+        - service: ec2
+        - service: ec2messages
+        - service: ssm
+        - service: ssmmessages
+        - service: kms
+        - service: logs
+        - service: lambda
+        - service: glue
+    useCentralEndpoints: false
+    resolverRules: []
+
+#Flow Log configurations
+vpcFlowLogs:
+  trafficType: ALL
+  maxAggregationInterval: 600
+  destinations:
+    - s3
+    - cloud-watch-logs
+  destinationsConfig:
+    s3:
+      lifecycleRules: []
+    cloudWatchLogs:
+      retentionInDays: 365
+  defaultFormat: false
+  customFields:
+    - version
+    - account-id
+    - interface-id
+    - srcaddr
+    - dstaddr
+    - srcport
+    - dstport
+    - protocol
+    - packets
+    - bytes
+    - start
+    - end
+    - action
+    - log-status
+    - vpc-id
+    - subnet-id
+    - instance-id
+    - tcp-flags
+    - type
+    - pkt-srcaddr
+    - pkt-dstaddr
+    - region
+    - az-id
+    - pkt-src-aws-service
+    - pkt-dst-aws-service
+    - flow-direction
+    - traffic-path
